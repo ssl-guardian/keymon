@@ -1,13 +1,13 @@
 {
   "name": "keymon",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "Modular SSL certificate collector for SSL Guardian with plugin architecture",
   "main": "collectorjs",
   "bin": {
     "keymon": "./collectorjs"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node collectorjs --list-plugins && node collectorjs --version"
   },
   "keywords": [
     "ssl",
