@@ -1,0 +1,895 @@
+#!/usr/bin/env node
+
+const https = require('https');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const tls = require('tls');
+const { execSync } = require('child_process');
+const PluginManager = require('./lib/plugin-manager');
+
+// Configuration
+const config = {
+  token: process.env.SSL_GUARDIAN_TOKEN,
+  orgId: process.env.SSL_GUARDIAN_ORG_ID,
+  apiUrl: process.env.SSL_GUARDIAN_API_URL || 'https://app.sslguardian.io',
+  action: null,
+  deleteId: null,
+  environment: null,
+  group: null,
+  filterSource: null,
+  cronSchedule: null,
+  cronName: null,
+  plugin: null,
+  pluginConfig: {}
+};
+
+// Parse command line arguments
+const args = process.argv.slice(2);
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i];
+  
+  if (arg === '--token' && i + 1 < args.length) {
+    config.token = args[++i];
+  } else if (arg === '--org-id' && i + 1 < args.length) {
+    config.orgId = args[++i];
+  } else if (arg === '--api-url' && i + 1 < args.length) {
+    config.apiUrl = args[++i];
+  } else if (arg === '--domain' && i + 1 < args.length) {
+    // Backward compatibility - convert to domain plugin
+    config.plugin = 'domain';
+    if (!config.pluginConfig.domains) config.pluginConfig.domains = [];
+    config.pluginConfig.domains.push(args[++i]);
+  } else if (arg === '--keystore' && i + 1 < args.length) {
+    // Backward compatibility - convert to keystore plugin
+    config.plugin = 'keystore';
+    if (!config.pluginConfig.keystores) config.pluginConfig.keystores = [];
+    config.pluginConfig.keystores.push(args[++i]);
+  } else if (arg === '--cert-folder' && i + 1 < args.length) {
+    // Backward compatibility - convert to cert-folder plugin
+    config.plugin = 'cert-folder';
+    if (!config.pluginConfig.folders) config.pluginConfig.folders = [];
+    config.pluginConfig.folders.push(args[++i]);
+  } else if (arg === '--ca-bundle' && i + 1 < args.length) {
+    // Backward compatibility - convert to pki-bundle plugin
+    config.plugin = 'pki-bundle';
+    if (!config.pluginConfig.bundles) config.pluginConfig.bundles = [];
+    config.pluginConfig.bundles.push(args[++i]);
+  } else if (arg === '--list') {
+    config.action = 'list';
+  } else if (arg === '--delete' && i + 1 < args.length) {
+    config.action = 'delete';
+    config.deleteId = args[++i];
+  } else if (arg === '--environment' && i + 1 < args.length) {
+    config.environment = args[++i];
+  } else if (arg === '--group' && i + 1 < args.length) {
+    config.group = args[++i];
+  } else if (arg === '--source' && i + 1 < args.length) {
+    config.filterSource = args[++i];
+  } else if (arg === '--cron' && i + 1 < args.length) {
+    config.cronSchedule = args[++i];
+  } else if (arg === '--cron-name' && i + 1 < args.length) {
+    config.cronName = args[++i];
+  } else if (arg === '--install-cron') {
+    config.action = 'install-cron';
+  } else if (arg === '--remove-cron') {
+    config.action = 'remove-cron';
+  } else if (arg === '--list-cron') {
+    config.action = 'list-cron';
+  } else if (arg === '--plugin' && i + 1 < args.length) {
+    config.plugin = args[++i];
+  } else if (arg.startsWith('--') && i + 1 < args.length && config.plugin) {
+    // Plugin-specific parameters
+    const paramName = arg.replace('--', '').replace(/-/g, '_');
+    config.pluginConfig[paramName] = args[++i];
+  } else if (arg === '--list-plugins') {
+    config.action = 'list-plugins';
+  } else if (arg === '--help') {
+    console.log(`
+KeyMon - SSL Guardian Collector
+
+Usage:
+  collector.js --plugin PLUGIN [plugin-options]
+  collector.js [legacy-options]  # Backward compatibility
+
+Core Options:
+  --token TOKEN       Token for SSL Guardian (required)
+  --org-id ORG_ID     Organization ID (required)
+  --api-url URL       API URL (default: https://app.sslguardian.io)
+  --environment ENV   Environment tag for certificates
+  --group GROUP       Group tag for certificates
+  --list              List all certificates with their IDs and status
+  --delete ID         Delete certificate by ID
+  --source SOURCE     Filter certificates by source
+  --list-plugins      List available plugins
+  --help              Show this help message
+
+Plugin System:
+  --plugin PLUGIN     Use specific plugin
+
+Available Plugins:
+  domain              Live HTTPS domain scanning
+  keystore            Java keystores (.jks, .p12, .pfx)
+  cert-folder         Certificate file directories
+  pki-bundle          PKI CA bundles
+  k8s-secrets         Kubernetes TLS secrets
+  nginx               Nginx configuration files
+  aws-acm             AWS Certificate Manager
+  macos-keychain      macOS Keychain
+  postgres-tls        PostgreSQL TLS certificates
+  windows-certstore   Windows Certificate Store
+
+Plugin Examples:
+  --plugin domain --domains google.com,github.com
+  --plugin keystore --keystores /path/to/store.jks
+  --plugin k8s-secrets --namespace prod
+  --plugin nginx --config-path /etc/nginx/sites-enabled/
+  --plugin aws-acm --region us-east-1
+
+Legacy Compatibility:
+  --domain DOMAIN     → --plugin domain --domains DOMAIN
+  --keystore PATH     → --plugin keystore --keystores PATH
+  --cert-folder PATH  → --plugin cert-folder --folders PATH
+  --ca-bundle PATH    → --plugin pki-bundle --bundles PATH
+
+Cron Scheduling:
+  --cron SCHEDULE     Cron schedule (e.g., '0 */6 * * *')
+  --cron-name NAME    Name for the cron job
+  --install-cron      Install current config as cron job
+  --remove-cron       Remove cron job
+  --list-cron         List installed cron jobs
+
+Environment Variables:
+  SSL_GUARDIAN_TOKEN    Token for SSL Guardian
+  SSL_GUARDIAN_ORG_ID   Organization ID
+  SSL_GUARDIAN_API_URL  API URL
+    `);
+    process.exit(0);
+  }
+}
+
+// Validate configuration (skip for plugin listing)
+if (config.action !== 'list-plugins' && !config.token) {
+  console.error('Error: Token is required. Use --token or set SSL_GUARDIAN_TOKEN environment variable.');
+  process.exit(1);
+}
+
+if (config.action !== 'list-plugins' && !config.orgId) {
+  console.error('Error: Organization ID is required. Use --org-id or set SSL_GUARDIAN_ORG_ID environment variable.');
+  process.exit(1);
+}
+
+if (!config.action && !config.plugin) {
+  console.error('Error: No sources specified. Use --domain, --keystore, --cert-folder, --ca-bundle, --plugin, --list, --delete, or cron actions.');
+  process.exit(1);
+}
+
+// Skip source validation for cron management actions
+if (['install-cron', 'remove-cron', 'list-cron', 'list-plugins'].includes(config.action)) {
+  // These actions don't need sources validation
+} else if (!config.action && !config.plugin) {
+  console.error('Error: No sources specified for certificate collection.');
+  process.exit(1);
+}
+
+// Function to parse certificate file
+function parseCertificateFile(filePath) {
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    
+    // Extract certificate from PEM format
+    const certMatch = content.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/);
+    if (!certMatch) {
+      throw new Error('No certificate found in file');
+    }
+    
+    // Use openssl to parse certificate
+    const tempFile = `/tmp/cert_${Date.now()}.pem`;
+    fs.writeFileSync(tempFile, certMatch[0]);
+    
+    try {
+      const output = execSync(`openssl x509 -in "${tempFile}" -text -noout`, { encoding: 'utf8' });
+      
+      // Parse certificate details
+      const subjectMatch = output.match(/Subject: (.+)/);
+      const issuerMatch = output.match(/Issuer: (.+)/);
+      const notBeforeMatch = output.match(/Not Before: (.+)/);
+      const notAfterMatch = output.match(/Not After : (.+)/);
+      const serialMatch = output.match(/Serial Number:\s*([a-f0-9:]+)/i);
+      const sanMatch = output.match(/DNS:([^,\s]+)/g);
+      
+      // Extract CN from subject
+      const subject = subjectMatch ? subjectMatch[1] : '';
+      const cnMatch = subject.match(/CN\s*=\s*([^,]+)/);
+      const domain = cnMatch ? cnMatch[1].trim() : path.basename(filePath, path.extname(filePath));
+      
+      // Extract issuer CN
+      const issuer = issuerMatch ? issuerMatch[1] : '';
+      const issuerCnMatch = issuer.match(/CN\s*=\s*([^,]+)/);
+      const issuerName = issuerCnMatch ? issuerCnMatch[1].trim() : 'Unknown';
+      
+      // Parse dates
+      const validFrom = notBeforeMatch ? new Date(notBeforeMatch[1]) : new Date();
+      const validTo = notAfterMatch ? new Date(notAfterMatch[1]) : new Date();
+      
+      // Parse SAN
+      const san = sanMatch ? sanMatch.map(s => s.replace('DNS:', '')) : [domain];
+      
+      // Get fingerprints
+      const sha1 = execSync(`openssl x509 -in "${tempFile}" -fingerprint -noout`, { encoding: 'utf8' }).match(/Fingerprint=(.+)/)?.[1];
+      const sha256 = execSync(`openssl x509 -in "${tempFile}" -fingerprint -sha256 -noout`, { encoding: 'utf8' }).match(/Fingerprint=(.+)/)?.[1];
+      
+      return {
+        domain,
+        issuer: issuerName,
+        expiration_date: validTo,
+        valid_from: validFrom,
+        subject: domain,
+        san,
+        fingerprint: sha1,
+        fingerprint256: sha256,
+        serial_number: serialMatch ? serialMatch[1] : '',
+        tags: { 
+          source: 'file',
+          file_path: filePath,
+          file_name: path.basename(filePath),
+          environment: config.environment,
+          group: config.group
+        }
+      };
+    } finally {
+      // Clean up temp file
+      if (fs.existsSync(tempFile)) {
+        fs.unlinkSync(tempFile);
+      }
+    }
+  } catch (error) {
+    throw new Error(`Failed to parse certificate file ${filePath}: ${error.message}`);
+  }
+}
+
+// Function to parse PKI CA bundle
+async function parsePkiBundle(bundlePath) {
+  try {
+    console.log(`Parsing PKI CA bundle: ${bundlePath}`);
+    
+    if (!fs.existsSync(bundlePath)) {
+      throw new Error('CA bundle file does not exist');
+    }
+    
+    const content = fs.readFileSync(bundlePath, 'utf8');
+    const certificates = [];
+    
+    // Split bundle into individual certificates
+    const certBlocks = content.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
+    
+    if (!certBlocks) {
+      throw new Error('No certificates found in CA bundle');
+    }
+    
+    for (let i = 0; i < certBlocks.length; i++) {
+      const certBlock = certBlocks[i];
+      const tempFile = `/tmp/pki_cert_${Date.now()}_${i}.pem`;
+      
+      try {
+        fs.writeFileSync(tempFile, certBlock);
+        
+        const output = execSync(`openssl x509 -in "${tempFile}" -text -noout`, { encoding: 'utf8' });
+        
+        // Parse certificate details
+        const subjectMatch = output.match(/Subject: (.+)/);
+        const issuerMatch = output.match(/Issuer: (.+)/);
+        const notBeforeMatch = output.match(/Not Before: (.+)/);
+        const notAfterMatch = output.match(/Not After : (.+)/);
+        const serialMatch = output.match(/Serial Number:\s*([a-f0-9:]+)/i);
+        
+        // Extract CN from subject
+        const subject = subjectMatch ? subjectMatch[1] : '';
+        const cnMatch = subject.match(/CN\s*=\s*([^,]+)/);
+        const domain = cnMatch ? cnMatch[1].trim() : `pki-cert-${i}`;
+        
+        // Extract issuer CN
+        const issuer = issuerMatch ? issuerMatch[1] : '';
+        const issuerCnMatch = issuer.match(/CN\s*=\s*([^,]+)/);
+        const issuerName = issuerCnMatch ? issuerCnMatch[1].trim() : 'Unknown';
+        
+        // Parse dates
+        const validFrom = notBeforeMatch ? new Date(notBeforeMatch[1]) : new Date();
+        const validTo = notAfterMatch ? new Date(notAfterMatch[1]) : new Date();
+        
+        // Get fingerprints
+        const sha1 = execSync(`openssl x509 -in "${tempFile}" -fingerprint -noout`, { encoding: 'utf8' }).match(/Fingerprint=(.+)/)?.[1];
+        const sha256 = execSync(`openssl x509 -in "${tempFile}" -fingerprint -sha256 -noout`, { encoding: 'utf8' }).match(/Fingerprint=(.+)/)?.[1];
+        
+        certificates.push({
+          domain,
+          issuer: issuerName,
+          expiration_date: validTo,
+          valid_from: validFrom,
+          subject: domain,
+          san: [domain],
+          fingerprint: sha1,
+          fingerprint256: sha256,
+          serial_number: serialMatch ? serialMatch[1] : '',
+          tags: {
+            source: 'pki',
+            bundle_path: bundlePath,
+            bundle_index: i,
+            environment: config.environment,
+            group: config.group
+          }
+        });
+        
+        console.log(`✓ Parsed PKI certificate: ${domain}`);
+      } catch (error) {
+        console.error(`✗ Failed to parse certificate ${i} in bundle: ${error.message}`);
+      } finally {
+        // Clean up temp file
+        if (fs.existsSync(tempFile)) {
+          fs.unlinkSync(tempFile);
+        }
+      }
+    }
+    
+    return certificates;
+  } catch (error) {
+    console.error(`Error parsing PKI bundle: ${error.message}`);
+    return [];
+  }
+}
+
+// Function to scan certificate folder
+async function scanCertificateFolder(folderPath) {
+  try {
+    console.log(`Scanning certificate folder: ${folderPath}`);
+    
+    if (!fs.existsSync(folderPath)) {
+      throw new Error('Folder does not exist');
+    }
+    
+    const certificates = [];
+    const files = fs.readdirSync(folderPath);
+    
+    // Common certificate file extensions
+    const certExtensions = ['.pem', '.crt', '.cer', '.cert', '.p7b', '.p7c'];
+    
+    for (const file of files) {
+      const filePath = path.join(folderPath, file);
+      const stat = fs.statSync(filePath);
+      
+      if (stat.isFile()) {
+        const ext = path.extname(file).toLowerCase();
+        
+        if (certExtensions.includes(ext)) {
+          try {
+            const cert = parseCertificateFile(filePath);
+            certificates.push(cert);
+            console.log(`✓ Parsed certificate: ${cert.domain}`);
+          } catch (error) {
+            console.error(`✗ Failed to parse ${file}: ${error.message}`);
+          }
+        }
+      }
+    }
+    
+    return certificates;
+  } catch (error) {
+    console.error(`Error scanning certificate folder: ${error.message}`);
+    return [];
+  }
+}
+
+// Function to extract certificate info from a keystore
+async function extractKeystoreInfo(keystorePath) {
+  try {
+    console.log(`Extracting certificate info from keystore: ${keystorePath}`);
+    
+    // Check if keytool is available
+    try {
+      execSync('keytool -help', { stdio: 'ignore' });
+    } catch (error) {
+      throw new Error('keytool not found. Please install Java JDK.');
+    }
+    
+    // Get keystore password
+    const password = process.env.KEYSTORE_PASSWORD || 'changeit';
+    
+    // List certificates in keystore
+    const output = execSync(`keytool -list -v -keystore "${keystorePath}" -storepass "${password}"`, { encoding: 'utf8' });
+    
+    // Parse output
+    const certificates = [];
+    const aliases = output.match(/Alias name: (.*?)$/gm);
+    
+    if (!aliases) {
+      throw new Error('No certificates found in keystore');
+    }
+    
+    for (const aliasLine of aliases) {
+      const alias = aliasLine.replace('Alias name: ', '').trim();
+      const certSection = output.split(aliasLine)[1].split('Alias name:')[0];
+      
+      // Extract certificate info
+      const ownerMatch = certSection.match(/Owner: (.*?)$/m);
+      const issuerMatch = certSection.match(/Issuer: (.*?)$/m);
+      const validFromMatch = certSection.match(/Valid from: (.*?) until: (.*?)$/m);
+      const serialMatch = certSection.match(/Serial number: (.*?)$/m);
+      
+      if (ownerMatch && issuerMatch && validFromMatch) {
+        const owner = ownerMatch[1];
+        const issuer = issuerMatch[1];
+        const validFrom = new Date(validFromMatch[1]);
+        const validUntil = new Date(validFromMatch[2]);
+        const serial = serialMatch ? serialMatch[1] : '';
+        
+        // Extract domain from CN
+        const cnMatch = owner.match(/CN=(.*?)(,|$)/);
+        const domain = cnMatch ? cnMatch[1] : path.basename(keystorePath) + '-' + alias;
+        
+        certificates.push({
+          domain,
+          issuer: issuer.match(/CN=(.*?)(,|$)/) ? issuer.match(/CN=(.*?)(,|$)/)[1] : 'Unknown',
+          expiration_date: validUntil,
+          valid_from: validFrom,
+          subject: domain,
+          san: [domain],
+          serial_number: serial,
+          tags: {
+            source: 'keystore',
+            keystore_path: keystorePath,
+            keystore_alias: alias,
+            environment: config.environment,
+            group: config.group
+          }
+        });
+      }
+    }
+    
+    return certificates;
+  } catch (error) {
+    console.error(`Error extracting keystore info: ${error.message}`);
+    return [];
+  }
+}
+
+// Function to fetch certificate info from a domain
+async function fetchCertificateInfo(domain) {
+  return new Promise((resolve, reject) => {
+    console.log(`Fetching certificate info for: ${domain}`);
+    
+    const [hostname, portStr] = domain.includes(':') ? domain.split(':') : [domain, '443'];
+    const port = parseInt(portStr) || 443;
+    
+    const options = {
+      host: hostname,
+      port: port,
+      method: 'GET',
+      rejectUnauthorized: false,
+      timeout: 10000
+    };
+    
+    const req = https.request(options, (res) => {
+      try {
+        const cert = res.socket.getPeerCertificate(true);
+        const protocol = res.socket.getProtocol();
+        const cipher = res.socket.getCipher();
+        
+        if (cert && cert.valid_to) {
+          const san = cert.subjectaltname ? 
+            cert.subjectaltname.split(', ').map(s => s.replace('DNS:', '')) : 
+            [hostname];
+          
+          resolve({
+            domain,
+            issuer: cert.issuer?.CN || cert.issuer?.O || 'Unknown',
+            expiration_date: new Date(cert.valid_to),
+            valid_from: new Date(cert.valid_from),
+            subject: cert.subject?.CN || hostname,
+            san,
+            fingerprint: cert.fingerprint,
+            fingerprint256: cert.fingerprint256,
+            serial_number: cert.serialNumber,
+            tags: { 
+              source: 'domain',
+              environment: config.environment,
+              group: config.group
+            }
+          });
+        } else {
+          reject(new Error(`No valid certificate found for ${domain}`));
+        }
+      } catch (error) {
+        reject(error);
+      }
+    });
+    
+    req.on('error', (error) => {
+      reject(error);
+    });
+    
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error(`Timeout connecting to ${domain}`));
+    });
+    
+    req.setTimeout(10000);
+    req.end();
+  });
+}
+
+// Function to list certificates
+async function listCertificates() {
+  return new Promise((resolve, reject) => {
+    const apiUrl = new URL('/v1/collector/certificates', config.apiUrl);
+    const options = {
+      method: 'GET',
+      headers: {
+        'token': config.token,
+        'org-id': config.orgId
+      }
+    };
+    
+    const requestModule = apiUrl.protocol === 'https:' ? https : http;
+    const req = requestModule.request(apiUrl, options, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try {
+            resolve(JSON.parse(data));
+          } catch (error) {
+            reject(new Error(`Invalid JSON response: ${data}`));
+          }
+        } else {
+          try {
+            const errorData = JSON.parse(data);
+            reject(new Error(errorData.error || `HTTP ${res.statusCode}`));
+          } catch (error) {
+            reject(new Error(`HTTP ${res.statusCode}: ${data}`));
+          }
+        }
+      });
+    });
+    
+    req.on('error', (error) => {
+      reject(error);
+    });
+    
+    req.end();
+  });
+}
+
+// Function to delete certificate
+async function deleteCertificate(id) {
+  return new Promise((resolve, reject) => {
+    const apiUrl = new URL(`/v1/collector/certificates/${id}`, config.apiUrl);
+    const options = {
+      method: 'DELETE',
+      headers: {
+        'token': config.token,
+        'org-id': config.orgId
+      }
+    };
+    
+    const requestModule = apiUrl.protocol === 'https:' ? https : http;
+    const req = requestModule.request(apiUrl, options, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try {
+            resolve(JSON.parse(data));
+          } catch (error) {
+            reject(new Error(`Invalid JSON response: ${data}`));
+          }
+        } else {
+          try {
+            const errorData = JSON.parse(data);
+            reject(new Error(errorData.error || `HTTP ${res.statusCode}`));
+          } catch (error) {
+            reject(new Error(`HTTP ${res.statusCode}: ${data}`));
+          }
+        }
+      });
+    });
+    
+    req.on('error', (error) => {
+      reject(error);
+    });
+    
+    req.end();
+  });
+}
+
+// Cron management functions
+function getCronCommand() {
+  const scriptPath = process.argv[1];
+  const args = process.argv.slice(2).filter(arg => 
+    !arg.startsWith('--cron') && 
+    !arg.startsWith('--install-cron') && 
+    !arg.startsWith('--remove-cron') && 
+    !arg.startsWith('--list-cron')
+  );
+  return `"${process.execPath}" "${scriptPath}" ${args.join(' ')}`;
+}
+
+function installCronJob() {
+  if (!config.cronSchedule) {
+    throw new Error('Cron schedule is required. Use --cron "0 */6 * * *"');
+  }
+  
+  const cronName = config.cronName || 'ssl-guardian-collector';
+  const command = getCronCommand();
+  const cronEntry = `${config.cronSchedule} ${command} # ${cronName}`;
+  
+  try {
+    // Get current crontab
+    let currentCron = '';
+    try {
+      currentCron = execSync('crontab -l', { encoding: 'utf8' });
+    } catch (error) {
+      // No existing crontab
+    }
+    
+    // Remove existing entry with same name
+    const lines = currentCron.split('\n').filter(line => 
+      !line.includes(`# ${cronName}`) && line.trim() !== ''
+    );
+    
+    // Add new entry
+    lines.push(cronEntry);
+    
+    // Install new crontab
+    const newCron = lines.join('\n') + '\n';
+    execSync('crontab -', { input: newCron, encoding: 'utf8' });
+    
+    console.log(`✓ Cron job '${cronName}' installed successfully`);
+    console.log(`Schedule: ${config.cronSchedule}`);
+    console.log(`Command: ${command}`);
+  } catch (error) {
+    throw new Error(`Failed to install cron job: ${error.message}`);
+  }
+}
+
+function removeCronJob() {
+  const cronName = config.cronName || 'ssl-guardian-collector';
+  
+  try {
+    // Get current crontab
+    let currentCron = '';
+    try {
+      currentCron = execSync('crontab -l', { encoding: 'utf8' });
+    } catch (error) {
+      console.log('No cron jobs found.');
+      return;
+    }
+    
+    // Remove entry with specified name
+    const lines = currentCron.split('\n').filter(line => 
+      !line.includes(`# ${cronName}`) && line.trim() !== ''
+    );
+    
+    // Install updated crontab
+    const newCron = lines.join('\n') + (lines.length > 0 ? '\n' : '');
+    execSync('crontab -', { input: newCron, encoding: 'utf8' });
+    
+    console.log(`✓ Cron job '${cronName}' removed successfully`);
+  } catch (error) {
+    throw new Error(`Failed to remove cron job: ${error.message}`);
+  }
+}
+
+function listCronJobs() {
+  try {
+    const currentCron = execSync('crontab -l', { encoding: 'utf8' });
+    const sslGuardianJobs = currentCron.split('\n').filter(line => 
+      line.includes('ssl-guardian') || line.includes('collector')
+    );
+    
+    if (sslGuardianJobs.length === 0) {
+      console.log('No SSL Guardian cron jobs found.');
+      return;
+    }
+    
+    console.log('SSL Guardian Cron Jobs:\n');
+    sslGuardianJobs.forEach((job, index) => {
+      const parts = job.split('#');
+      const schedule = parts[0].trim();
+      const name = parts[1] ? parts[1].trim() : `Job ${index + 1}`;
+      console.log(`${name}:`);
+      console.log(`  Schedule: ${schedule}`);
+      console.log(`  Full entry: ${job}`);
+      console.log('');
+    });
+  } catch (error) {
+    console.log('No cron jobs found or crontab not accessible.');
+  }
+}
+
+// Function to submit certificates to SSL Guardian
+async function submitCertificates(certificates) {
+  return new Promise((resolve, reject) => {
+    const apiUrl = new URL('/v1/collector/submit', config.apiUrl);
+    const options = {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'token': config.token,
+        'org-id': config.orgId
+      }
+    };
+    
+    // Use http or https based on protocol
+    const requestModule = apiUrl.protocol === 'https:' ? https : http;
+    const req = requestModule.request(apiUrl, options, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try {
+            resolve(JSON.parse(data));
+          } catch (error) {
+            reject(new Error(`Invalid JSON response: ${data}`));
+          }
+        } else {
+          try {
+            const errorData = JSON.parse(data);
+            reject(new Error(errorData.error || `HTTP ${res.statusCode}`));
+          } catch (error) {
+            reject(new Error(`HTTP ${res.statusCode}: ${data}`));
+          }
+        }
+      });
+    });
+    
+    req.on('error', (error) => {
+      reject(error);
+    });
+    
+    req.write(JSON.stringify({ certificates }));
+    req.end();
+  });
+}
+
+// Main function
+async function main() {
+  try {
+    // Handle cron actions
+    if (config.action === 'install-cron') {
+      installCronJob();
+      return;
+    }
+    
+    if (config.action === 'remove-cron') {
+      removeCronJob();
+      return;
+    }
+    
+    if (config.action === 'list-cron') {
+      listCronJobs();
+      return;
+    }
+    
+    // Handle plugin actions
+    if (config.action === 'list-plugins') {
+      const pluginManager = new PluginManager();
+      const plugins = pluginManager.listAvailablePlugins();
+      console.log('Available plugins:');
+      plugins.forEach(plugin => console.log(`  - ${plugin}`));
+      return;
+    }
+    
+    // Handle list action
+    if (config.action === 'list') {
+      console.log('Fetching certificates list...');
+      const result = await listCertificates();
+      
+      if (result.certificates.length === 0) {
+        console.log('No certificates found.');
+        return;
+      }
+      
+      // Filter by source if specified
+      let filteredCerts = result.certificates;
+      if (config.filterSource) {
+        filteredCerts = result.certificates.filter(cert => {
+          const tags = typeof cert.tags === 'string' ? JSON.parse(cert.tags) : cert.tags;
+          return tags && tags.source === config.filterSource;
+        });
+        
+        if (filteredCerts.length === 0) {
+          console.log(`No certificates found with source: ${config.filterSource}`);
+          return;
+        }
+      }
+      
+      console.log(`\nFound ${filteredCerts.length} certificates${config.filterSource ? ` (filtered by source: ${config.filterSource})` : ''}:\n`);
+      console.log('ID\t\tDomain\t\t\t\tStatus\t\tDays\tSource\tIssuer');
+      console.log('─'.repeat(90));
+      
+      filteredCerts.forEach(cert => {
+        const tags = typeof cert.tags === 'string' ? JSON.parse(cert.tags) : cert.tags;
+        const source = tags?.source || 'unknown';
+        const statusColor = {
+          'expired': '🔴',
+          'critical': '🟡', 
+          'warning': '🟠',
+          'valid': '🟢'
+        }[cert.status] || '⚪';
+        
+        console.log(`${cert.id}\t${cert.domain.padEnd(25)}\t${statusColor} ${cert.status.padEnd(8)}\t${cert.days_until_expiration}\t${source}\t${cert.issuer}`);
+      });
+      
+      return;
+    }
+    
+    // Handle delete action
+    if (config.action === 'delete') {
+      console.log(`Deleting certificate with ID: ${config.deleteId}`);
+      const result = await deleteCertificate(config.deleteId);
+      console.log(`✓ ${result.message}`);
+      return;
+    }
+    
+    // Handle plugin execution
+    if (config.plugin) {
+      const pluginManager = new PluginManager();
+      const pluginConfig = {
+        ...config.pluginConfig,
+        environment: config.environment,
+        group: config.group
+      };
+      
+      console.log(`Executing plugin: ${config.plugin}`);
+      const pluginCerts = await pluginManager.executePlugin(config.plugin, pluginConfig);
+      
+      if (pluginCerts.length === 0) {
+        console.error('No certificates found.');
+        process.exit(1);
+      }
+      
+      console.log(`Submitting ${pluginCerts.length} certificates to SSL Guardian...`);
+      const result = await submitCertificates(pluginCerts);
+      
+      const created = result.results.filter(r => r.status === 'created').length;
+      const updated = result.results.filter(r => r.status === 'updated').length;
+      const errors = result.results.filter(r => r.status === 'error').length;
+      
+      console.log('Submission results:');
+      console.log(`✓ Created: ${created}`);
+      console.log(`✓ Updated: ${updated}`);
+      console.log(`✗ Errors: ${errors}`);
+      
+      if (errors > 0) {
+        console.log('\nError details:');
+        result.results.filter(r => r.status === 'error').forEach(r => {
+          console.log(`- ${r.domain}: ${r.error}`);
+        });
+      }
+      
+      return;
+    }
+    
+    // All certificate collection is now handled by plugins
+    console.error('Error: No plugin specified. Use --plugin or legacy options.');
+    process.exit(1);
+    
+  } catch (error) {
+    console.error(`Error: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+main();

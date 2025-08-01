@@ -1,0 +1,48 @@
+{
+  "name": "keymon",
+  "version": "1.1.0",
+  "description": "Modular SSL certificate collector for SSL Guardian with plugin architecture",
+  "main": "collectorjs",
+  "bin": {
+    "keymon": "./collectorjs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "ssl",
+    "certificate",
+    "monitoring",
+    "security",
+    "tls",
+    "keystore",
+    "kubernetes",
+    "nginx",
+    "aws",
+    "acm"
+  ],
+  "author": "SSL Guardian",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ssl-guardian/keymon.git"
+  },
+  "homepage": "https://github.com/ssl-guardian/keymon#readme",
+  "bugs": {
+    "url": "https://github.com/ssl-guardian/keymon/issues"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "files": [
+    "collectorjs",
+    "lib/",
+    "plugins/",
+    "README.md",
+    "PLUGINS.md",
+    "CHANGELOG.md"
+  ],
+  "dependencies": {
+    "keymon": "^1.0.0"
+  }
+}
