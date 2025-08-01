@@ -80,10 +80,18 @@ for (let i = 0; i < args.length; i++) {
     config.plugin = args[++i];
   } else if (arg.startsWith('--') && i + 1 < args.length && config.plugin) {
     // Plugin-specific parameters
-    const paramName = arg.replace('--', '').replace(/-/g, '_');
+    let paramName = arg.replace('--', '');
+    // Convert kebab-case to camelCase for plugin parameters
+    if (paramName.includes('-')) {
+      paramName = paramName.replace(/-([a-z])/g, (match, letter) => letter.toUpperCase());
+    }
     config.pluginConfig[paramName] = args[++i];
   } else if (arg === '--list-plugins') {
     config.action = 'list-plugins';
+  } else if (arg === '--version') {
+    const packageJson = require('./package.json');
+    console.log(packageJson.version);
+    process.exit(0);
   } else if (arg === '--help') {
     console.log(`
 KeyMon - SSL Guardian Collector
@@ -102,6 +110,7 @@ Core Options:
   --delete ID         Delete certificate by ID
   --source SOURCE     Filter certificates by source
   --list-plugins      List available plugins
+  --version           Show version number
   --help              Show this help message
 
 Plugin System:
