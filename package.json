@@ -1,6 +1,6 @@
 {
   "name": "keymon",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Modular SSL certificate collector for SSL Guardian with plugin architecture",
   "main": "collectorjs",
   "bin": {
