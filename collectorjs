@@ -13,6 +13,7 @@ const config = {
   token: process.env.SSL_GUARDIAN_TOKEN,
   orgId: process.env.SSL_GUARDIAN_ORG_ID,
   apiUrl: process.env.SSL_GUARDIAN_API_URL || 'https://app.sslguardian.io',
+  proxyUrl: process.env.HTTPS_PROXY || process.env.HTTP_PROXY,
   action: null,
   deleteId: null,
   environment: null,
@@ -35,6 +36,8 @@ for (let i = 0; i < args.length; i++) {
     config.orgId = args[++i];
   } else if (arg === '--api-url' && i + 1 < args.length) {
     config.apiUrl = args[++i];
+  } else if (arg === '--proxy' && i + 1 < args.length) {
+    config.proxyUrl = args[++i];
   } else if (arg === '--domain' && i + 1 < args.length) {
     // Backward compatibility - convert to domain plugin
     config.plugin = 'domain';
@@ -104,6 +107,7 @@ Core Options:
   --token TOKEN       Token for SSL Guardian (required)
   --org-id ORG_ID     Organization ID (required)
   --api-url URL       API URL (default: https://app.sslguardian.io)
+  --proxy URL         Proxy URL for HTTP/HTTPS requests
   --environment ENV   Environment tag for certificates
   --group GROUP       Group tag for certificates
   --list              List all certificates with their IDs and status
@@ -152,6 +156,8 @@ Environment Variables:
   SSL_GUARDIAN_TOKEN    Token for SSL Guardian
   SSL_GUARDIAN_ORG_ID   Organization ID
   SSL_GUARDIAN_API_URL  API URL
+  HTTPS_PROXY          Proxy URL for HTTPS requests
+  HTTP_PROXY           Proxy URL for HTTP requests
     `);
     process.exit(0);
   }
@@ -526,20 +532,48 @@ async function fetchCertificateInfo(domain) {
   });
 }
 
+// Function to create HTTP request options with proxy support
+function createRequestOptions(url, method, headers = {}) {
+  const options = {
+    method,
+    headers
+  };
+  
+  if (config.proxyUrl) {
+    const proxyUrl = new URL(config.proxyUrl);
+    const targetUrl = new URL(url);
+    
+    options.hostname = proxyUrl.hostname;
+    options.port = proxyUrl.port;
+    options.path = targetUrl.href;
+    options.headers['Host'] = targetUrl.hostname;
+    
+    // Add proxy authentication if provided
+    if (proxyUrl.username && proxyUrl.password) {
+      const auth = Buffer.from(`${proxyUrl.username}:${proxyUrl.password}`).toString('base64');
+      options.headers['Proxy-Authorization'] = `Basic ${auth}`;
+    }
+  } else {
+    const targetUrl = new URL(url);
+    options.hostname = targetUrl.hostname;
+    options.port = targetUrl.port;
+    options.path = targetUrl.pathname + targetUrl.search;
+  }
+  
+  return options;
+}
+
 // Function to list certificates
 async function listCertificates() {
   return new Promise((resolve, reject) => {
     const apiUrl = new URL('/v1/collector/certificates', config.apiUrl);
-    const options = {
-      method: 'GET',
-      headers: {
-        'token': config.token,
-        'org-id': config.orgId
-      }
-    };
+    const options = createRequestOptions(apiUrl.href, 'GET', {
+      'token': config.token,
+      'org-id': config.orgId
+    });
     
     const requestModule = apiUrl.protocol === 'https:' ? https : http;
-    const req = requestModule.request(apiUrl, options, (res) => {
+    const req = requestModule.request(options, (res) => {
       let data = '';
       
       res.on('data', (chunk) => {
@@ -576,16 +610,13 @@ async function listCertificates() {
 async function deleteCertificate(id) {
   return new Promise((resolve, reject) => {
     const apiUrl = new URL(`/v1/collector/certificates/${id}`, config.apiUrl);
-    const options = {
-      method: 'DELETE',
-      headers: {
-        'token': config.token,
-        'org-id': config.orgId
-      }
-    };
+    const options = createRequestOptions(apiUrl.href, 'DELETE', {
+      'token': config.token,
+      'org-id': config.orgId
+    });
     
     const requestModule = apiUrl.protocol === 'https:' ? https : http;
-    const req = requestModule.request(apiUrl, options, (res) => {
+    const req = requestModule.request(options, (res) => {
       let data = '';
       
       res.on('data', (chunk) => {
@@ -727,18 +758,15 @@ function listCronJobs() {
 async function submitCertificates(certificates) {
   return new Promise((resolve, reject) => {
     const apiUrl = new URL('/v1/collector/submit', config.apiUrl);
-    const options = {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'token': config.token,
-        'org-id': config.orgId
-      }
-    };
+    const options = createRequestOptions(apiUrl.href, 'POST', {
+      'Content-Type': 'application/json',
+      'token': config.token,
+      'org-id': config.orgId
+    });
     
     // Use http or https based on protocol
     const requestModule = apiUrl.protocol === 'https:' ? https : http;
-    const req = requestModule.request(apiUrl, options, (res) => {
+    const req = requestModule.request(options, (res) => {
       let data = '';
       
       res.on('data', (chunk) => {

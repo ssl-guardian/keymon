@@ -66,20 +66,40 @@ class K8sSecretsPlugin extends BasePlugin {
     };
   }
 
+  createRequestOptions(url, method, headers = {}) {
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    const options = { method, headers, rejectUnauthorized: false };
+    
+    if (proxyUrl) {
+      const proxy = new URL(proxyUrl);
+      const target = new URL(url);
+      
+      options.hostname = proxy.hostname;
+      options.port = proxy.port;
+      options.path = target.href;
+      options.headers['Host'] = target.hostname;
+      
+      if (proxy.username && proxy.password) {
+        const auth = Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64');
+        options.headers['Proxy-Authorization'] = `Basic ${auth}`;
+      }
+    } else {
+      const target = new URL(url);
+      options.hostname = target.hostname;
+      options.port = target.port || 443;
+      options.path = target.pathname + target.search;
+    }
+    
+    return options;
+  }
+
   async k8sRequest(path, k8sConfig) {
     const url = new URL(path, k8sConfig.server);
     
-    const options = {
-      hostname: url.hostname,
-      port: url.port || 443,
-      path: url.pathname + url.search,
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${k8sConfig.token}`,
-        'Accept': 'application/json'
-      },
-      rejectUnauthorized: false // For self-signed certs
-    };
+    const options = this.createRequestOptions(url.href, 'GET', {
+      'Authorization': `Bearer ${k8sConfig.token}`,
+      'Accept': 'application/json'
+    });
     
     return new Promise((resolve, reject) => {
       const req = https.request(options, (res) => {

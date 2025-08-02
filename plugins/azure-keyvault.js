@@ -33,6 +33,33 @@ class AzureKeyVaultPlugin extends BasePlugin {
     }
   }
 
+  createRequestOptions(url, method, headers = {}) {
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    const options = { method, headers };
+    
+    if (proxyUrl) {
+      const proxy = new URL(proxyUrl);
+      const target = new URL(url);
+      
+      options.hostname = proxy.hostname;
+      options.port = proxy.port;
+      options.path = target.href;
+      options.headers['Host'] = target.hostname;
+      
+      if (proxy.username && proxy.password) {
+        const auth = Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64');
+        options.headers['Proxy-Authorization'] = `Basic ${auth}`;
+      }
+    } else {
+      const target = new URL(url);
+      options.hostname = target.hostname;
+      options.port = target.port;
+      options.path = target.pathname + target.search;
+    }
+    
+    return options;
+  }
+
   async getAccessToken(config) {
     const tokenUrl = `https://login.microsoftonline.com/${config.tenantId}/oauth2/v2.0/token`;
     const postData = new URLSearchParams({
@@ -43,13 +70,12 @@ class AzureKeyVaultPlugin extends BasePlugin {
     }).toString();
 
     return new Promise((resolve, reject) => {
-      const req = https.request(tokenUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Content-Length': postData.length
-        }
-      }, (res) => {
+      const options = this.createRequestOptions(tokenUrl, 'POST', {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': postData.length
+      });
+      
+      const req = https.request(options, (res) => {
         let data = '';
         res.on('data', chunk => data += chunk);
         res.on('end', () => {
@@ -76,13 +102,12 @@ class AzureKeyVaultPlugin extends BasePlugin {
     const url = `https://${vaultName}.vault.azure.net/certificates?api-version=7.4`;
     
     return new Promise((resolve, reject) => {
-      const req = https.request(url, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      }, (res) => {
+      const options = this.createRequestOptions(url, 'GET', {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      });
+      
+      const req = https.request(options, (res) => {
         let data = '';
         res.on('data', chunk => data += chunk);
         res.on('end', () => {
@@ -101,13 +126,12 @@ class AzureKeyVaultPlugin extends BasePlugin {
 
   async getCertificateDetails(certId, accessToken, config) {
     return new Promise((resolve, reject) => {
-      const req = https.request(`${certId}?api-version=7.4`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      }, (res) => {
+      const options = this.createRequestOptions(`${certId}?api-version=7.4`, 'GET', {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      });
+      
+      const req = https.request(options, (res) => {
         let data = '';
         res.on('data', chunk => data += chunk);
         res.on('end', () => {

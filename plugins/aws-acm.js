@@ -34,6 +34,33 @@ class AwsAcmPlugin extends BasePlugin {
     }
   }
 
+  createRequestOptions(url, method, headers = {}) {
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    const options = { method, headers };
+    
+    if (proxyUrl) {
+      const proxy = new URL(proxyUrl);
+      const target = new URL(url);
+      
+      options.hostname = proxy.hostname;
+      options.port = proxy.port;
+      options.path = target.href;
+      options.headers['Host'] = target.hostname;
+      
+      if (proxy.username && proxy.password) {
+        const auth = Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64');
+        options.headers['Proxy-Authorization'] = `Basic ${auth}`;
+      }
+    } else {
+      const target = new URL(url);
+      options.hostname = target.hostname;
+      options.port = target.port;
+      options.path = target.pathname + target.search;
+    }
+    
+    return options;
+  }
+
   async awsRequest(service, target, payload, region, config) {
     const host = `${service}.${region}.amazonaws.com`;
     const method = 'POST';
@@ -58,19 +85,15 @@ class AwsAcmPlugin extends BasePlugin {
     const authorizationHeader = `${algorithm} Credential=${config.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
     
     return new Promise((resolve, reject) => {
-      const req = https.request({
-        hostname: host,
-        port: 443,
-        path: canonicalUri,
-        method: method,
-        headers: {
-          'Content-Type': 'application/x-amz-json-1.1',
-          'X-Amz-Date': amzDate,
-          'X-Amz-Target': target,
-          'Authorization': authorizationHeader,
-          'Content-Length': payload.length
-        }
-      }, (res) => {
+      const options = this.createRequestOptions(`https://${host}${canonicalUri}`, method, {
+        'Content-Type': 'application/x-amz-json-1.1',
+        'X-Amz-Date': amzDate,
+        'X-Amz-Target': target,
+        'Authorization': authorizationHeader,
+        'Content-Length': payload.length
+      });
+      
+      const req = https.request(options, (res) => {
         let data = '';
         res.on('data', chunk => data += chunk);
         res.on('end', () => {

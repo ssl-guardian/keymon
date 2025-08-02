@@ -219,6 +219,7 @@ keymon --keystore /path/to/keystore.jks
 | `--plugin PLUGIN` | Use specific plugin | Yes* | `--plugin domain` |
 | `--token TOKEN` | SSL Guardian authentication token | Yes** | `--token abc123...` |
 | `--org-id ORG_ID` | Organization ID | Yes** | `--org-id uuid-here` |
+| `--proxy URL` | Proxy URL for HTTP/HTTPS requests | No | `--proxy http://proxy:8080` |
 | `--environment ENV` | Environment tag for certificates | No | `--environment production` |
 | `--group GROUP` | Group tag for certificates | No | `--group "Web Services"` |
 | `--list` | List all certificates with status | No* | `--list` |
@@ -235,6 +236,8 @@ keymon --keystore /path/to/keystore.jks
 | `SSL_GUARDIAN_TOKEN` | Authentication token | None |
 | `SSL_GUARDIAN_ORG_ID` | Organization ID | None |
 | `SSL_GUARDIAN_API_URL` | API endpoint | `https://app.sslguardian.io` |
+| `HTTPS_PROXY` | Proxy URL for HTTPS requests | None |
+| `HTTP_PROXY` | Proxy URL for HTTP requests | None |
 | `KEYSTORE_PASSWORD` | Keystore password | `changeit` |
 
 ## Plugin Details
@@ -420,6 +423,43 @@ keymon --cron-name "daily-ssl-check" --remove-cron
 | `0 0 * * 0` | Weekly on Sunday | Weekly PKI updates |
 | `0 0 1 * *` | Monthly on 1st | Monthly compliance checks |
 | `0 2 * * 1-5` | Weekdays at 2 AM | Business day monitoring |
+
+## Enterprise Proxy Support
+
+KeyMon supports HTTP/HTTPS proxies for enterprise environments without direct internet access:
+
+### Using Environment Variables:
+```bash
+# Set proxy for all requests
+export HTTPS_PROXY=http://proxy.company.com:8080
+export HTTP_PROXY=http://proxy.company.com:8080
+
+# Run KeyMon normally
+keymon --plugin domain --domains example.com
+```
+
+### Using Command Line:
+```bash
+# Specify proxy per command
+keymon --plugin azure-keyvault --vault-name myvault \
+  --proxy http://proxy.company.com:8080 \
+  --client-id xxx --client-secret xxx --tenant-id xxx
+```
+
+### Proxy Authentication:
+```bash
+# Proxy with authentication
+export HTTPS_PROXY=http://username:password@proxy.company.com:8080
+
+# Or via command line
+keymon --proxy http://username:password@proxy.company.com:8080 --plugin domain --domains example.com
+```
+
+### Supported Proxy Types:
+- ✅ **HTTP Proxy** - Standard HTTP proxy servers
+- ✅ **HTTPS Proxy** - Secure proxy connections
+- ✅ **Authenticated Proxies** - Username/password authentication
+- ✅ **Corporate Proxies** - Enterprise proxy configurations
 
 ## Advanced Usage
 
